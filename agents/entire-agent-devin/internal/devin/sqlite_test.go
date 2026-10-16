@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -18,12 +19,21 @@ func setDevinDataDir(t *testing.T, dataDir string) {
 	t.Setenv("APPDATA", dataDir)
 }
 
-// setupSessionsDB creates a temporary Devin sessions.db with the live schema
-// and returns the path to the data directory (suitable for XDG_DATA_HOME).
+// setupSessionsDB creates a temporary Devin sessions.db under the `cli`
+// store with the live schema and returns the path to the data directory
+// (suitable for XDG_DATA_HOME).
 func setupSessionsDB(t *testing.T) (string, *sql.DB) {
 	t.Helper()
 	dataDir := t.TempDir()
-	dbDir := filepath.Join(dataDir, "devin", "cli")
+	return dataDir, setupSessionsDBAt(t, dataDir, "cli")
+}
+
+// setupSessionsDBAt creates a sessions.db with the live schema under
+// <dataDir>/devin/<store> ("cli" for Devin CLI, "cli-next" for Devin
+// Desktop) and returns the open database.
+func setupSessionsDBAt(t *testing.T, dataDir, store string) *sql.DB {
+	t.Helper()
+	dbDir := filepath.Join(dataDir, "devin", store)
 	if err := os.MkdirAll(dbDir, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +76,7 @@ CREATE TABLE IF NOT EXISTS message_nodes (
 	if _, err := db.Exec(schema); err != nil {
 		t.Fatal(err)
 	}
-	return dataDir, db
+	return db
 }
 
 func insertSession(t *testing.T, db *sql.DB, id, model string, mainChainID int) {
@@ -379,6 +389,120 @@ func TestMaterializeLiveTranscript_NullSessionMetadata(t *testing.T) {
 	if _, err := db.Exec(`UPDATE sessions SET metadata = NULL WHERE id = ?`, sessionID); err != nil {
 		t.Fatal(err)
 	}
+
+	d := New()
+	sessionRef := filepath.Join(transcriptDir, sessionID+".json")
+	if err := d.materializeLiveTranscript(sessionRef); err != nil {
+		t.Fatalf("materializeLiveTranscript: %v", err)
+	}
+	tx, err := parseTranscriptFile(sessionRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tx.Steps) != 1 {
+		t.Fatalf("steps = %d, want 1", len(tx.Steps))
+	}
+}
+
+func TestSessionsDBPath_CliNextStore(t *testing.T) {
+	dataDir := t.TempDir()
+	setDevinDataDir(t, dataDir)
+	// Devin Desktop ("Devin - Next") writes to <data-dir>/devin/cli-next.
+	db := setupSessionsDBAt(t, dataDir, "cli-next")
+	insertSession(t, db, "desktop-only", "SWE-2", 1)
+
+	path, err := sessionsDBPath("desktop-only")
+	if err != nil {
+		t.Fatalf("sessionsDBPath: %v", err)
+	}
+	want := filepath.Join(dataDir, "devin", "cli-next", "sessions.db")
+	if path != want {
+		t.Errorf("path = %q, want %q", path, want)
+	}
+}
+
+func TestSessionsDBPath_CliStore(t *testing.T) {
+	dataDir := t.TempDir()
+	setDevinDataDir(t, dataDir)
+	db := setupSessionsDBAt(t, dataDir, "cli")
+	insertSession(t, db, "cli-only", "SWE-1.7", 1)
+
+	path, err := sessionsDBPath("cli-only")
+	if err != nil {
+		t.Fatalf("sessionsDBPath: %v", err)
+	}
+	want := filepath.Join(dataDir, "devin", "cli", "sessions.db")
+	if path != want {
+		t.Errorf("path = %q, want %q", path, want)
+	}
+}
+
+func TestSessionsDBPath_CliNextWinsWhenInBoth(t *testing.T) {
+	dataDir := t.TempDir()
+	setDevinDataDir(t, dataDir)
+	next := setupSessionsDBAt(t, dataDir, "cli-next")
+	cli := setupSessionsDBAt(t, dataDir, "cli")
+	insertSession(t, next, "both", "SWE-2", 1)
+	insertSession(t, cli, "both", "SWE-1.7", 1)
+
+	path, err := sessionsDBPath("both")
+	if err != nil {
+		t.Fatalf("sessionsDBPath: %v", err)
+	}
+	want := filepath.Join(dataDir, "devin", "cli-next", "sessions.db")
+	if path != want {
+		t.Errorf("path = %q, want %q (cli-next wins)", path, want)
+	}
+}
+
+func TestSessionsDBPath_ErrorListsCheckedPaths(t *testing.T) {
+	dataDir := t.TempDir()
+	setDevinDataDir(t, dataDir)
+	// Both stores exist but neither contains the session.
+	setupSessionsDBAt(t, dataDir, "cli-next")
+	setupSessionsDBAt(t, dataDir, "cli")
+
+	_, err := sessionsDBPath("missing-session")
+	if err == nil {
+		t.Fatal("expected error for missing session")
+	}
+	for _, store := range []string{"cli-next", "cli"} {
+		p := filepath.Join(dataDir, "devin", store, "sessions.db")
+		if !strings.Contains(err.Error(), p) {
+			t.Errorf("error %q does not name checked path %q", err, p)
+		}
+	}
+}
+
+func TestSessionsDBPath_ReadOnlyWhileWriterHoldsWAL(t *testing.T) {
+	dataDir := t.TempDir()
+	setDevinDataDir(t, dataDir)
+	db := setupSessionsDBAt(t, dataDir, "cli-next")
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		t.Fatal(err)
+	}
+	insertSession(t, db, "wal-session", "SWE-2", 1)
+	// db stays open for the rest of the test (t.Cleanup closes it).
+
+	path, err := sessionsDBPath("wal-session")
+	if err != nil {
+		t.Fatalf("sessionsDBPath under WAL writer: %v", err)
+	}
+	if path != filepath.Join(dataDir, "devin", "cli-next", "sessions.db") {
+		t.Errorf("path = %q", path)
+	}
+}
+
+func TestMaterializeLiveTranscript_CliNextStore(t *testing.T) {
+	dataDir := t.TempDir()
+	setDevinDataDir(t, dataDir)
+	transcriptDir := t.TempDir()
+	t.Setenv("ENTIRE_TEST_DEVIN_TRANSCRIPT_DIR", transcriptDir)
+
+	db := setupSessionsDBAt(t, dataDir, "cli-next")
+	sessionID := "desktop-session"
+	insertSession(t, db, sessionID, "SWE-2", 1)
+	insertNode(t, db, sessionID, 1, 0, `{"role":"user","content":"from desktop"}`, "")
 
 	d := New()
 	sessionRef := filepath.Join(transcriptDir, sessionID+".json")

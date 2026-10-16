@@ -13,13 +13,69 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// sessionsDBPath returns the local Devin CLI SQLite session store.
-func sessionsDBPath() (string, error) {
+// sessionsDBCandidates lists Devin's SQLite session stores under the shared
+// data dir, in probe order: cli-next is Devin Desktop ("Devin - Next"); cli
+// is the standalone Devin CLI. Both keep the same sessions/message_nodes
+// schema; a session lives in whichever product created it.
+func sessionsDBCandidates(dataDir string) []string {
+	return []string{
+		filepath.Join(dataDir, "cli-next", "sessions.db"),
+		filepath.Join(dataDir, "cli", "sessions.db"),
+	}
+}
+
+// sessionsDBPath resolves which local Devin session store contains
+// sessionID, probing cli-next before cli. The stores are in WAL mode and
+// actively written by a running Devin process, so each probe opens the
+// database read-only with a busy timeout.
+func sessionsDBPath(sessionID string) (string, error) {
 	dataDir, err := devinDataDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dataDir, "cli", "sessions.db"), nil
+	candidates := sessionsDBCandidates(dataDir)
+	for _, path := range candidates {
+		if _, err := os.Stat(path); err != nil {
+			continue // missing or unreadable store — try the next one
+		}
+		contains, err := storeContainsSession(path, sessionID)
+		if err == nil && contains {
+			return path, nil
+		}
+		// A store that exists but can't be opened or queried (corrupt file,
+		// schema without sessions) is treated as not containing the session.
+	}
+	return "", fmt.Errorf(
+		"session %q not found in any Devin sessions.db (checked: %s)",
+		sessionID, strings.Join(candidates, ", "),
+	)
+}
+
+// openSessionsDBReadOnly opens a live sessions.db read-only. mode=ro keeps
+// the open from creating or modifying the file; the busy timeout tolerates
+// a writer (the running Devin process) holding the WAL lock briefly.
+func openSessionsDBReadOnly(path string) (*sql.DB, error) {
+	return sql.Open(
+		"sqlite",
+		fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(2000)", filepath.ToSlash(path)),
+	)
+}
+
+func storeContainsSession(path, sessionID string) (bool, error) {
+	db, err := openSessionsDBReadOnly(path)
+	if err != nil {
+		return false, err
+	}
+	defer db.Close()
+	var one int
+	err = db.QueryRow(`SELECT 1 FROM sessions WHERE id = ?`, sessionID).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 type sessionRow struct {
@@ -85,23 +141,22 @@ type chatMetrics struct {
 // materializeLiveTranscript builds an ATIF transcript from Devin's live
 // SQLite session store and writes it to the canonical transcript path. It is
 // a best-effort fallback used when Devin has not yet flushed the ATIF file
-// (which happens on session exit). If anything goes wrong it returns an
-// error so the caller can fall back to a stub.
+// (which happens on session exit) — for Devin Desktop sessions it is the
+// only source, since cli-next never writes a canonical ATIF file at all.
+// If anything goes wrong it returns an error so the caller can fall back to
+// a stub.
 func (a *Agent) materializeLiveTranscript(sessionRef string) error {
 	sessionID := strings.TrimSuffix(filepath.Base(sessionRef), ".json")
 	if sessionID == "" {
 		return errors.New("empty session id")
 	}
 
-	dbPath, err := sessionsDBPath()
+	dbPath, err := sessionsDBPath(sessionID)
 	if err != nil {
 		return err
 	}
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		return fmt.Errorf("devin sessions.db not found at %s", dbPath)
-	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := openSessionsDBReadOnly(dbPath)
 	if err != nil {
 		return fmt.Errorf("open sessions.db: %w", err)
 	}

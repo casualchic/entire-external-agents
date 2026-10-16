@@ -11,7 +11,11 @@ import (
 
 // TranscriptsDir returns the directory where Devin CLI stores canonical
 // session transcripts: <data-dir>/cli/transcripts. The directory is flat —
-// one <session_id>.json per session, not per-project.
+// one <session_id>.json per session, not per-project. Devin Desktop
+// ("cli-next") never writes a canonical transcript there — its sessions are
+// always served by the SQLite materializer — but Entire-materialized
+// transcripts land in this directory regardless of which store the live
+// session was read from.
 func TranscriptsDir() (string, error) {
 	if override := os.Getenv("ENTIRE_TEST_DEVIN_TRANSCRIPT_DIR"); override != "" {
 		return override, nil

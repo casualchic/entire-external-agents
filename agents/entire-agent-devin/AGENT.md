@@ -77,21 +77,29 @@ same repo, or set `read_config_from.claude=false` in `.devin/config.json`.
 ## Session storage and transcripts
 
 - Live session store: SQLite at `~/.local/share/devin/cli/sessions.db`
-  (message-node forest). `PrepareTranscript` now reads `message_nodes`
-  directly and materializes a live ATIF transcript before falling back to a
-  stub, so mid-session checkpoints include real conversation history while
-  the session is still running. Transcripts it materializes are marked
+  (message-node forest) for Devin CLI, and
+  `~/.local/share/devin/cli-next/sessions.db` for **Devin Desktop**
+  ("Devin - Next") — same schema (`sessions`, `message_nodes`), different
+  directory. `PrepareTranscript` resolves which store contains the session
+  (cli-next first, then cli), opens it read-only with a busy timeout (the
+  live DB is in WAL and actively written), and materializes a live ATIF
+  transcript from `message_nodes` before falling back to a stub, so
+  mid-session checkpoints include real conversation history while the
+  session is still running. Transcripts it materializes are marked
   (`agent.extra.entire_materialized`) and refreshed from `sessions.db` on
   every checkpoint; Devin-authored transcripts are never touched. This
-  requires the `devin` CLI to be logged in and writing sessions to the same
-  local store.
+  requires the `devin` CLI (or Devin Desktop) to be logged in and writing
+  sessions to the same local store.
 - Canonical transcript: **ATIF** (`schema_version: "ATIF-v1.7"`) JSON written
   to `~/.local/share/devin/cli/transcripts/<session_id>.json`
   (`%APPDATA%\devin\cli\transcripts` on Windows; `$XDG_DATA_HOME` honored).
   The directory is flat — not per-project. `devin --export [PATH]` writes the
   identical document. The live SQLite materializer and the canonical file
   use the same schema and file location, so subsequent checkpoint reads are
-  indifferent to which one produced the transcript.
+  indifferent to which one produced the transcript. Devin Desktop sessions
+  are always served by the SQLite path: `cli-next/` has no `transcripts/`
+  directory and Desktop never writes the canonical file — the materialized
+  transcript is the only ATIF document they get.
 - **Flush timing (important):** the canonical transcript file is written on
   session exit, not per turn. In print mode it is written between the `Stop`
   and `SessionEnd` hooks. In interactive mode it is only written when the

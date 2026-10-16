@@ -13,10 +13,14 @@ and token usage from Devin CLI sessions.
   (`~/.local/share/devin/cli/transcripts/<session_id>.json`): step positions,
   modified files from `write`/`edit`/`notebook_edit` tool calls, user prompts
 - **Transcript preparer** — polls for the canonical ATIF file; if Devin has
-  not flushed it yet, reads `~/.local/share/devin/cli/sessions.db`
-  (`message_nodes`) and materializes a live ATIF transcript, falling back to
-  a minimal stub only when both sources are unavailable; Entire-materialized
-  files are refreshed on every checkpoint
+  not flushed it yet, reads the live session store — Devin Desktop at
+  `~/.local/share/devin/cli-next/sessions.db` or Devin CLI at
+  `~/.local/share/devin/cli/sessions.db` (`message_nodes`), whichever
+  contains the session — and materializes a live ATIF transcript, falling
+  back to a minimal stub only when both sources are unavailable;
+  Entire-materialized files are refreshed on every checkpoint. Devin
+  Desktop sessions are always served this way: Desktop writes no canonical
+  ATIF file
 - **Token calculation** — per-step `metrics` (prompt/completion/cached
   tokens; fresh input = prompt − cached)
 - **Compact transcripts** — converts ATIF steps (messages, tool calls, and
